@@ -1,0 +1,4 @@
+#!/bin/sh -e
+mkdir -p /var/log/mot
+chown nobody:nogroup /var/log/mot
+chmod 02755 /var/log/mot
