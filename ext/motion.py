@@ -10,7 +10,7 @@ import time
 import requests
 import datetime
 from PIL import Image
-from subprocess import Popen, PIPE
+# from subprocess import Popen, PIPE #///// no longer needed?
 import imutils
 import pymongo
 import shutil
