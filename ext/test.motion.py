@@ -2,6 +2,7 @@ import av
 import av.datasets
 import cv2 as cv
 import argparse
+import imutils
 
 resize_height = 400
 
@@ -24,7 +25,6 @@ stream.thread_type = "AUTO"
 
 gen = container.decode(stream)
 doOnce = True
-burning = True
 burnedCount = 0
 while True:
     try:
@@ -47,15 +47,29 @@ while True:
     fgmask = backSub.apply(resized_frame)
     thresh = cv.threshold(fgmask, 15, 255, cv.THRESH_BINARY)[1]
     thresh = cv.erode(thresh, None, iterations=2)
-    thresh = cv.dilate(thresh, None, iterations=2)
-    contours, hierarchy = cv.findContours(
+    thresh = cv.dilate(thresh, None, iterations=4)
+    thresh = cv.erode(thresh, None, iterations=2)
+    contours = cv.findContours(
         thresh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
     converted = cv.cvtColor(fgmask, cv.COLOR_GRAY2BGR)
-    frame_w_contours = cv.drawContours(
-        converted, contours, -1, (0, 0, 255), -1)
+    # print(len(contours))
+    for contour in contours:
+        perim = cv.arcLength(contour, True)
+        approx = cv.approxPolyDP(contour, 0.04 * perim, True)
+        resized_frame = cv.drawContours(
+            resized_frame, [approx], -1, (0, 255, 255), 2)
+        x,y,w,h = cv.boundingRect(contour)
+        resized_frame = cv.rectangle(resized_frame,(x,y),(x+w,y+h),(255,0,0),2)
+
+    # frame_w_contours = cv.drawContours(
+    #   converted, contours, -1, (0, 0, 255), -1)
 
     # cv.imshow('frame',frame_w_contours)
-    output.write(frame_w_contours)
+    output.write(resized_frame)
 
 container.close()
 output.release()
+
+# x,y,w,h = cv.boundingRect(cnt)
+# cv.rectangle(img,(x,y),(x+w,y+h),(0,255,0),2)
