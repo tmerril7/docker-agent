@@ -24,6 +24,8 @@ stream.thread_type = "AUTO"
 
 gen = container.decode(stream)
 doOnce = True
+burning = True
+burnedCount = 0
 while True:
     try:
         frame = next(gen)
@@ -32,14 +34,27 @@ while True:
     while doOnce:
         height = frame.height
         width = frame.width
-        output = cv.VideoWriter('./output.mp4', cv.VideoWriter_fourcc(*'mp4v'), 20, (int(resize_height/height*width), resize_height),False)
+        output = cv.VideoWriter('./output.mp4', cv.VideoWriter_fourcc(*'mp4v'),
+                                20, (int(resize_height/height*width), resize_height))
         doOnce = False
-    resized_frame = cv.resize(frame.to_ndarray(format="bgr24"), (int(resize_height/height*width), resize_height))
+    while burnedCount < 5:
+        resized_frame = cv.resize(frame.to_ndarray(
+            format="bgr24"), (int(resize_height/height*width), resize_height))
+        fgmask = backSub.apply(resized_frame)
+        burnedCount = burnedCount + 1
+    resized_frame = cv.resize(frame.to_ndarray(
+        format="bgr24"), (int(resize_height/height*width), resize_height))
     fgmask = backSub.apply(resized_frame)
-    contours, hierarchy = cv.findContours(fgmask,cv.RETR_TREE,cv.CHAIN_APPROX_SIMPLE)
-    frame_w_contours = cv.drawContours(fgmask,contours,-1,(255,0,0),1)
+    thresh = cv.threshold(fgmask, 15, 255, cv.THRESH_BINARY)[1]
+    thresh = cv.erode(thresh, None, iterations=2)
+    thresh = cv.dilate(thresh, None, iterations=2)
+    contours, hierarchy = cv.findContours(
+        thresh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    converted = cv.cvtColor(fgmask, cv.COLOR_GRAY2BGR)
+    frame_w_contours = cv.drawContours(
+        converted, contours, -1, (0, 0, 255), -1)
 
-    #cv.imshow('frame',frame_w_contours)
+    # cv.imshow('frame',frame_w_contours)
     output.write(frame_w_contours)
 
 container.close()
