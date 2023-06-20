@@ -9,8 +9,7 @@ import numpy
 import time
 import requests
 import datetime
-from PIL import Image
-# from subprocess import Popen, PIPE #///// no longer needed?
+
 import imutils
 import pymongo
 import shutil
@@ -22,22 +21,11 @@ from astral import LocationInfo
 from astral.sun import sun
 import gc
 
+# Global variables
 
-def create_rotating_log(path):
-    global logger
-    logger = logging.getLogger("Rotating Log")
-    logger.setLevel(logging.INFO)
-    handler = RotatingFileHandler(path, maxBytes=700000, backupCount=4)
-    formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-
-
-loggerFile = '/var/log/motion.log'
-create_rotating_log(loggerFile)
 
 """ Default Constant Variables """
-
+loggerFile = '/var/log/motion.log'
 refresh_mongo_time = 5.0 * 60.0
 reduction_multiplier = 0.2197
 max_of_screen = 1.0 / 5.0
@@ -63,7 +51,6 @@ upDays = 1
 startTime = int(datetime.datetime.now(
     tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp())
 lastHeartBeat = 0
-use_new_ffmpeg_read = True
 area_of_interest = 0
 
 """ blob detector params"""
@@ -99,14 +86,27 @@ client = pymongo.MongoClient(
 db = client.motionDetection
 
 
+# setup logging
+def create_rotating_log(path):
+    global logger
+    logger = logging.getLogger("Rotating Log")
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(path, maxBytes=700000, backupCount=4)
+    formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+create_rotating_log(loggerFile)
+
+# function: update settings from mongo
+
+
 def update_mongo():
     global mongo_vars
     mongo_vars = db.cameras.find_one({'cameraName': cameraName}, {'_id': 0})
     while mongo_vars == None:
-        '''
-        print(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).strftime('%b %d, %Y - %H:%M: ')\
-        + "can't find camera in database",end='\r')
-        '''
+
         logger.warning(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).strftime('%b %d, %Y - %H:%M: ')
                        + "can't find camera in database")
         time.sleep(10)
@@ -176,6 +176,8 @@ last_mongo_update = 0
 while update_mongo() == False:
     time.sleep(60)
 
+# function: send heartbeat to kerberos
+
 
 def heartBeat():
     if int(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp()) - startTime <= (60*60*24):
@@ -189,7 +191,7 @@ def heartBeat():
     heartBeatURL = 'https://api.cloud.kerberos.io/devices/heartbeat'
     data = {
         "key": mongo_vars['deviceName'],
-        "version": "8.3",
+        "version": "3.2",
         "clouduser": mongo_vars['hubUser'],
         "cloudpublickey": mongo_vars['hubKey'],
         "cameraname": mongo_vars['cameraName'],
@@ -207,7 +209,6 @@ def heartBeat():
 
 in_filename = ""
 path = "/ramdisk/"+cameraName
-# path = '/ramdisk/samples'
 uploadPath = '/tmp/staging'
 
 
@@ -218,9 +219,8 @@ rook_subFolder = args.rookSubFolder
 rook_url = args.rookUrl
 
 
-"""Thu, 14 Jul 2022 17:56:38 +0000"""
-
-
+# example time format needed: """Thu, 14 Jul 2022 17:56:38 +0000"""
+# function: upload to s3
 def s3_send(path_to_file, filename):
 
     timeNow = datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
@@ -312,77 +312,6 @@ def diff_subtot_area(gray0, gray, max_area):
     return subtot, dilated, len(cnts), bodies_over_min, bodies_under_min, bodies_over_max
 
 
-def mot_scan(name, thumb, mask):
-    trigger = False
-    makeThumb = not thumb
-    makeMask = not mask
-    frame_count = 0
-    samples = input_fps / int(samples_per_minute/60)
-    percScreen = 0
-    areaIndex = 0
-    subtot = 0
-    prevSubtot = 0
-    maxAve = 0
-    tot = 0
-    ave = 0
-    areas = []
-    areas = [0 for i in range(numAreas)]
-    ret, frame = cap.read()
-    frame_count = frame_count + 1
-    gray = process_frame(frame, makeThumb, makeMask)
-
-    # p = Popen(['ffmpeg','-y','-f','image2pipe','-vcodec','bmp','-r',str(samples_per_minute/60),'-i','-','-vcodec','h264','-preset','ultrafast','-crf','32','-r',str(samples_per_minute/60),'out'+'-'+str(fileCount)+name+'.mp4'],stdin=PIPE)
-    while ret:
-        while frame_count < samples:
-            ret, frame = cap.read()
-            frame_count = frame_count + 1
-        frame_count = 0
-        if ret == False:
-            break
-        gray0 = gray
-        gray = process_frame(frame, False, False)
-        subtot, dilated, cnts, b_o_m, b_u_m = diff_subtot_area(gray0, gray)
-
-        """smooth area readings"""
-        if subtot > prevSubtot:
-            if subtot - prevSubtot > subtot * maxPercInc:
-                subtot = prevSubtot + subtot * maxPercInc
-        tot = tot - areas[areaIndex]
-        areas[areaIndex] = subtot
-        tot = tot + areas[areaIndex]
-        areaIndex = areaIndex + 1
-        if areaIndex >= numAreas:
-            areaIndex = 0
-        ave = tot / numAreas
-
-        percScreen = ave / (frame_height * frame_width)
-        if percScreen > maxAve:
-            maxAve = percScreen
-        if percScreen >= perc_screen_threshold:
-            trigger = True
-            break
-
-        prevSubtot = subtot
-        # dilated = cv2.putText(dilated, "area: {:.3%}".format(percScreen),(10,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,200,255),1)
-        # dilated = cv2.putText(dilated,"bodies: {}".format(cnts) + ' ({}/'.format(b_u_m) + '{})'.format(b_o_m),(10,80),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),1)
-        """
-                if do_blobdetect:
-                        detector = cv2.SimpleBlobDetector_create(params)
-                        keypoints = detector.detect(dilated)
-                        im_with_keypoints = cv2.drawKeypoints(dilated,keypoints,numpy.array([]),(255,0,0),cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-                        im = Image.fromarray(im_with_keypoints)
-                        im.save(p.stdin,'bmp')
-                else:
-                        im = Image.fromarray(dilated)
-                        im.save(p.stdin, 'bmp')
-                """
-    # p.stdin.close()
-    # p.wait()
-    if not use_new_ffmpeg_read:
-        cap.release()
-    return trigger, maxAve
-
-
 def mot_scan_lib_av(name, thumb, mask):
     trigger = False
     makeThumb = not thumb
@@ -454,7 +383,7 @@ def mot_scan_lib_av(name, thumb, mask):
         if area_of_interest == 0:
             area_of_interest = int(
                 resize_height/frame_height*frame_width) * resize_height
-        # int(resize_height/frame_height*frame_width) * resize_height #(frame_height * frame_width)
+
         percScreen = ave / area_of_interest
         if percScreen > maxAve:
             maxAve = percScreen
@@ -463,49 +392,33 @@ def mot_scan_lib_av(name, thumb, mask):
             perc_screen_threshold = night_perc_screen_threshold
         if percScreen >= perc_screen_threshold:
             trigger = True
-            # break
 
         prevSubtot = subtot
         if prevSubtot < 100:
             prevSubtot = 100
-        # dilated = cv2.putText(dilated, "area: {:.3%}".format(percScreen),(10,20),cv2.FONT_HERSHEY_SIMPLEX, 1, (255,200,255),1)
-        # dilated = cv2.putText(dilated,"bodies: {}".format(cnts) + ' ({}/'.format(b_u_m) + '{})'.format(b_o_m),(10,80),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),1)
-        """
-                if do_blobdetect:
-                        detector = cv2.SimpleBlobDetector_create(params)
-                        keypoints = detector.detect(dilated)
-                        im_with_keypoints = cv2.drawKeypoints(dilated,keypoints,numpy.array([]),(255,0,0),cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-                        im = Image.fromarray(im_with_keypoints)
-                        im.save(p.stdin,'bmp')
-                else:
-                        im = Image.fromarray(dilated)
-                        im.save(p.stdin, 'bmp')
-                """
-    # except:
-    #         print('it failed to decode')
-    #         trigger = False
-    #         logger.error('failed to decode video')
 
-    # p.stdin.close()
-    # p.wait()
     container.close()
     return trigger, maxAve, bod_o_max, b_o_m, b_u_m
 
 
-# fsize = 0
-# selectedName = ''
-# num_files = 1
+# endless loop to run forever
 while True:
+    # scan the folder and find the oldest video
     with os.scandir(path) as it:
         thumb_exists = False
         mask_exists = False
         selectedName = ''
         oldestTime = 0
         for entry in it:
+            # check if thumbnail exists
             if entry.name == 'thumb.jpg':
                 thumb_exists = True
+
+            # check if mask exists
             if entry.name == 'mask.jpg':
                 mask_exists = True
+
+            # file must begin with 'new'
             if entry.name.startswith('new'):
                 if oldestTime == 0:
                     oldestTime = os.stat(entry.path).st_mtime
@@ -514,61 +427,58 @@ while True:
                     if os.stat(entry.path).st_mtime - oldestTime < 0:
                         oldestTime = os.stat(entry.path).st_mtime
                         selectedName = entry.path
+
+    # start processing selected video file
     if selectedName != '':
+        # note down filesize
         fSize = os.stat(selectedName).st_size
-        print('\033[2K\r{}'.format(fSize), end='')
+        # print('\033[2K\r{}'.format(fSize), end='')
         while True:
             gc.collect()
-            # snapshot = tracemalloc.take_snapshot()
-            # top_stats = snapshot.statistics('filename')
-            # print("[ Top 10 ]")
-            # for stat in top_stats[:10]:
-            #         print(stat)
-            time.sleep(3)
-            print('\033[2K\r{}'.format(os.stat(selectedName).st_size), end='')
+
+            # pause to see if filesize is still growing
+            time.sleep(2)
+            # print('\033[2K\r{}'.format(os.stat(selectedName).st_size), end='')
+
+            # if size hasn't changed
             if fSize == os.stat(selectedName).st_size:
-                if not use_new_ffmpeg_read:
-                    # global trigger
-                    # global maxAve
-                    # global cap
-                    cap = cv2.VideoCapture(selectedName)
-                    # global frame_height
-                    # global frame_width
-                    frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    max_area = max_of_screen * area_of_interest
-                    if frame_height <= 1:
-                        logger.warning('failed Div 0: ' + selectedName)
-                        trigger = False
-                        maxAve = 0
-                        break
-                    start_stopwatch = time.time()
-                    trigger, maxAve = mot_scan(
-                        selectedName, thumb_exists, mask_exists)
-                    duration = time.time() - start_stopwatch
-                    logger.info(
-                        'time to run motion scan: {:.3}'.format(duration))
-                    break
-                else:
-                    daylight = True
-                    recDateTime = datetime.datetime.now(tz=camera_tz)
-                    s = sun(location.observer, date=datetime.date(
-                        recDateTime.year, recDateTime.month, recDateTime.day), tzinfo=location.timezone)
-                    if recDateTime < s['dawn'] or recDateTime > s['dusk']:
-                        daylight = False
-                    start_stopwatch = time.time()
-                    trigger, maxAve, b_o_max, b_o_m, b_u_m = mot_scan_lib_av(
-                        selectedName, thumb_exists, mask_exists)
-                    duration = time.time() - start_stopwatch
-                    logger.info(
-                        'time to run motion scan: {:.3}'.format(duration))
-                    break
+
+                # check if video was during daylight
+                daylight = True
+
+                # TO-DO: should change this to use the filename time in case we are processing the video after a delay
+                recDateTime = datetime.datetime.now(tz=camera_tz)
+                s = sun(location.observer, date=datetime.date(
+                    recDateTime.year, recDateTime.month, recDateTime.day), tzinfo=location.timezone)
+
+                # use nightime settings if true
+                if recDateTime < s['dawn'] or recDateTime > s['dusk']:
+                    daylight = False
+
+                # checking performance of motion scan function
+                start_stopwatch = time.time()
+
+                # main call to the motion scan function
+                trigger, maxAve, b_o_max, b_o_m, b_u_m = mot_scan_lib_av(
+                    selectedName, thumb_exists, mask_exists)
+
+                # finished timing motion scan function - log time
+                duration = time.time() - start_stopwatch
+                logger.info(
+                    'time to run motion scan: {:.3}'.format(duration))
+
+                # break while loop to continue processing
+                break
             else:
                 fSize = os.stat(selectedName).st_size
+
+        # log motion scan results
         logger.info(' '+str(trigger)+' {:.5f}'.format(maxAve)+' {} {}'.format(frame_width, frame_height) +
                     ' area_interest: {} b_o_m: {} b_u_m: {} b_o_max: {}'.format(area_of_interest, b_o_m, b_u_m, b_o_max))
-        # print('area of mask: ',area_of_interest)
+
+        # do this if motion scan set trigger
         if trigger == True:
+            # rename file to fit kerberos style
             newname = uploadPath + '/' \
                 + str(int(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp())) \
                 + '_6-967003_' \
@@ -576,24 +486,29 @@ while True:
                 + '_200-200-400-400_24_769' \
                 + '.mp4'
             try:
+                # copy file to upload folder then remove original
                 shutil.copy2(selectedName, newname)
                 os.remove(selectedName)
             except:
                 continue
+
+        # if trigger is false then discard video
         else:
             os.remove(selectedName)
+
+    # if no file was selected from source folder
     else:
-        print('\033[2K\r'+'no files to process', end='')
+        # sleep until checking the folder again
         time.sleep(10)
 
-        #  periodic mongodb refresh
+    # periodic mongodb refresh
     if int(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp()) - int(last_mongo_update) >= int(refresh_mongo_time):
         logger.info('refreshing mongodb at {}'.format(str(int(datetime.datetime.now(
             tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp()))))
         while update_mongo() == False:
             time.sleep(60)
 
-        # periodic hearbeat
+    # periodic hearbeat
     if int(datetime.datetime.now(tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp()) - int(lastHeartBeat) >= int(heartBeatInterval):
         logger.info('sending heartbeat at {}'.format(str(int(datetime.datetime.now(
             tz=datetime.timezone(datetime.timedelta(hours=-6))).timestamp()))))
