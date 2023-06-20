@@ -3,13 +3,13 @@ import hmac
 import base64
 import av
 import av.datasets
-import cv2
+import cv2 as cv
 import os
 import numpy
 import time
 import requests
 import datetime
-
+from PIL import Image
 import imutils
 import pymongo
 import shutil
@@ -20,9 +20,14 @@ import pytz
 from astral import LocationInfo
 from astral.sun import sun
 import gc
+import math
 
 # Global variables
 
+
+for i in range(1, averaging_size):
+    averageArea.append(0)
+index = 0
 
 """ Default Constant Variables """
 loggerFile = '/var/log/motion.log'
@@ -30,7 +35,7 @@ refresh_mongo_time = 5.0 * 60.0
 reduction_multiplier = 0.2197
 max_of_screen = 1.0 / 5.0
 input_fps = 20
-resize_height = 720
+resize_height = 400
 blur_size = 15
 pts = []
 samples_per_minute = 240
@@ -311,8 +316,20 @@ def diff_subtot_area(gray0, gray, max_area):
             bodies_under_min = bodies_under_min + 1
     return subtot, dilated, len(cnts), bodies_over_min, bodies_under_min, bodies_over_max
 
+# function: scan video for motion
+
 
 def mot_scan_lib_av(name, thumb, mask):
+    highestAverage = 0
+    learning_rate = 0
+    maxSpeed = 20
+    averaging_size = 20
+    averageArea = [0]
+    wholeAverageList = list()
+    wholeAverage = 0
+    backSub = cv.createBackgroundSubtractorKNN()
+    cXp = 0
+    cYp = 0
     trigger = False
     makeThumb = not thumb
     makeMask = not mask
@@ -338,19 +355,133 @@ def mot_scan_lib_av(name, thumb, mask):
         container = av.open(av.datasets.curated(name))
     except:
         logger.error('could not open mp4')
-        return trigger, maxAve, bod_o_max, b_o_m, b_u_m
+        return trigger, highestAverage, wholeAverage
     stream = container.streams.video[0]
     stream.thread_type = "AUTO"
 
     first_pass = True
-    # p = Popen(['ffmpeg','-y','-f','image2pipe','-vcodec','bmp','-r',str(samples_per_minute/60),'-i','-','-vcodec','h264','-preset','ultrafast','-crf','32','-r',str(samples_per_minute/60),'out'+'-'+str(fileCount)+name+'.mp4'],stdin=PIPE)
-    # try:
+
+    # create iteration generator for stream
+    gen = container.decode(stream)
+
+    # count of frames burned off the beginning of the video
+    burnedCount = 0
+
+    # loop till the video frames are exhausted
+    while True:
+
+        # open next frame, if we get StopIteration code then we break
+        try:
+            frame = next(gen)
+        except StopIteration:
+            break
+
+        while first_pass:
+            height = frame.height
+            width = frame.width
+            first_pass = False
+
+        # burn off frames from beginning of the video (avoids false motion at beginning of video)
+        while burnedCount < 5:
+            resized_frame = cv.resize(frame.to_ndarray(
+                format="bgr24"), (int(resize_height/height*width), resize_height))
+            fgmask = backSub.apply(resized_frame, learning_rate)
+            burnedCount += 1
+
+        # resize frame
+        resized_frame = cv.resize(frame.to_ndarray(
+            format="bgr24"), (int(resize_height/height*width), resize_height))
+
+        # create foreground mask
+        fgmask = backSub.apply(resized_frame, learning_rate)
+
+        # process binary image frame
+        binary_frame = cv.threshold(fgmask, 15, 255, cv.THRESH_BINARY)[1]
+        binary_frame = cv.erode(binary_frame, None, iterations=2)
+        binary_frame = cv.dilate(binary_frame, None, iterations=4)
+        binary_frame = cv.erode(binary_frame, None, iterations=2)
+
+        # find contours
+        contours = cv.findContours(
+            binary_frame, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        contours = imutils.grab_contours(contours)
+
+        # set variables for analyzing contours in this frame
+        largest_contour_area = 0
+        cXd = 0
+        cYd = 0
+        delta = 0
+
+        # look at each contour to find the largest
+        for contour in contours:
+
+            # measure perimeter
+            perim = cv.arcLength(contour, True)
+
+            # simplify the contour to less points
+            approx = cv.approxPolyDP(contour, 0.02 * perim, True)
+
+            # get area of the simplified contour
+            contour_area = cv.contourArea(approx)
+
+            # check if this is the new biggest contour
+            if contour_area > largest_contour_area:
+
+                # set new area
+                largest_contour_area = contour_area
+
+                # get moments of contour
+                M = cv.moments(contour)
+
+        # check if there was even a contour to look at for this frame
+        if largest_contour_area > 0:
+
+            # set x,y for contour center of mass
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+
+            # see how far the center of mass moved from last frame
+            cXd = abs(cX - cXp)
+            cYd = abs(cY - cYp)
+
+            # set the prime values for next frame
+            cXp = cX
+            cYp = cY
+
+            # get distance moved
+            delta = int(math.sqrt(cXd * cXd + cYd * cYd))
+
+        # if object not moving too fast, add to the average area list
+        if delta < maxSpeed:
+            averageArea[index] = int(max_area)
+        else:
+            averageArea[index] = 0
+
+        # increment index
+        index += 1
+
+        # loop back to first position
+        if index > averaging_size - 1:
+            index = 0
+
+        # calculate average motion at this frame
+        aveMotion = sum(averageArea)/len(averageArea)
+
+        if aveMotion > highestAverage:
+            highestAverage = aveMotion
+
+        # add to list to generate whole video average at the end
+        wholeAverageList.append(aveMotion)
+
+    # generate whole average
+    wholeAverage = int(sum(wholeAverageList)/len(wholeAverageList))
+
+    return trigger, highestAverage, wholeAverage
+
     for decoded_frame in container.decode(stream):
         # print('start decoding')
         if first_pass:
-            # print('first_pass')
-            frame_height = decoded_frame.height
-            frame_width = decoded_frame.width
+
             # max_area = float(frame_height * frame_width) * max_of_screen * reduction_multiplier
             gray = process_frame(decoded_frame.to_ndarray(
                 format="bgr24"), makeThumb, makeMask)
@@ -459,7 +590,7 @@ while True:
                 start_stopwatch = time.time()
 
                 # main call to the motion scan function
-                trigger, maxAve, b_o_max, b_o_m, b_u_m = mot_scan_lib_av(
+                trigger, highestAverage, wholeAverage = mot_scan_lib_av(
                     selectedName, thumb_exists, mask_exists)
 
                 # finished timing motion scan function - log time
